@@ -1,0 +1,12 @@
+# Secrets — never commit
+config/rclone.conf
+config/.env
+
+# Runtime artefacts
+state/
+logs/
+backups/
+
+# Editor cruft
+.DS_Store
+*.swp
