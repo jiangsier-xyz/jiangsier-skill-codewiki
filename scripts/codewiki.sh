@@ -5,7 +5,8 @@
 #               a human or programmatically by an external AI Agent.
 #
 # Usage:
-#   ./codewiki.sh -r <repo> [-o <output>] [-i "<instructions>"]
+#   ./codewiki.sh -r <repo> [-o <output>] [-i "<instructions>"] \
+#                 [--render <mkdocs|vitepress|both>] [--serve [PORT]]
 #
 # Exit codes:
 #   0  Success — wiki generated under <output>/<repo>/wiki
@@ -13,6 +14,7 @@
 #   2  Dependency missing (bash, git, or codewiki)
 #   3  Clone/pull failure
 #   4  codewiki generation failure
+#   5  Render failure (render_docs.sh non-zero exit)
 #
 # --------------------------------------------------------------------------- #
 
@@ -32,12 +34,16 @@ REPOSITORY=""          # Parsed value of -r/--repository. Required.
 OUTPUT_DIR="."         # Parsed value of -o/--output. Defaults to CWD.
 INSTRUCTIONS=""        # Parsed value of -i/--instructions. Optional.
 HAVE_INSTRUCTIONS=0    # 1 if -i was passed; keeps quoting logic explicit.
+RENDER_STACK=""        # Parsed value of --render. Empty = skip rendering.
+HAVE_RENDER=0          # 1 if --render was passed; distinguishes "" from absent.
+SERVE=0                # 1 if --serve was passed (only valid with --render).
+SERVE_PORT=""          # Optional port value parsed after --serve.
 
 # -----------------------------------------------------------------------------
 # Script metadata, used by --help and --version-style introspection.
 # -----------------------------------------------------------------------------
 SCRIPT_NAME="codewiki.sh"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 
 # -----------------------------------------------------------------------------
 # print_help()
@@ -51,6 +57,7 @@ codewiki.sh — Clone a repo and generate a wiki with the `codewiki` CLI.
 
 SYNOPSIS
   codewiki.sh -r <repository> [-o <output_dir>] [-i "<instructions>"]
+              [--render <mkdocs|vitepress|both>] [--serve [PORT]]
   codewiki.sh -h | --help
 
 DESCRIPTION
@@ -62,12 +69,26 @@ DESCRIPTION
        https://github.com/<group>/<repository>.git
     2. "https://..." or "git@..."       -> used verbatim as the clone URL.
 
+  When --render is supplied, the sibling `render_docs.sh` is invoked after the
+  wiki is generated, turning the Markdown into a static MkDocs and/or VitePress
+  site. Rendered sites land under <output>/<repo>/mkdocs and/or
+  <output>/<repo>/vitepress.
+
 OPTIONS
   -r, --repository <repo>     (Required) Repo shorthand or full clone URL.
-  -o, --output <dir>          (Optional) Destination directory. Created with
+  -o, --output <dir>           (Optional) Destination directory. Created with
                               `mkdir -p` if missing. Defaults to ".".
   -i, --instructions <text>   (Optional) Free-form instructions passed
                               verbatim to `codewiki generate --instructions`.
+      --render <stack>        (Optional) Render the generated wiki with the
+                              sibling render_docs.sh. <stack> must be one of
+                              `mkdocs`, `vitepress`, or `both`. Omit to skip
+                              rendering entirely.
+      --serve [PORT]          (Optional) After rendering, start a static HTTP
+                              server on the built site(s). Requires --render.
+                              PORT defaults to 8000; when <stack>=both,
+                              MkDocs is served on PORT and VitePress on PORT+1.
+                              The server runs in the foreground; Ctrl-C stops.
   -h, --help                  Show this help and exit.
 
 EXAMPLES
@@ -79,13 +100,13 @@ EXAMPLES
               -o ./work/bar \
               -i "Focus on the auth module; skip vendored code."
 
-  # SSH URL:
-  codewiki.sh -r git@github.com:foo/bar.git -o ./out
+  # Generate + render both stacks, then serve on port 3000:
+  codewiki.sh -r foo/bar --render both --serve 3000
 
 EXIT CODES
   0  Success          1  Usage error
   2  Missing dep      3  Clone/pull failure
-  4  Generation failure
+  4  Generation failure    5  Render failure
 HELP
 }
 
@@ -251,6 +272,59 @@ run_codewiki() {
 }
 
 # -----------------------------------------------------------------------------
+# render_docs <wiki_dir> <repo_dir> <stack> <serve> <serve_port>
+# Invoke the sibling `render_docs.sh` to turn the generated Markdown wiki
+# into a static MkDocs and/or VitePress site. Rendered outputs are co-located
+# with the wiki under <repo_dir>/mkdocs and <repo_dir>/vitepress so the whole
+# pipeline stays self-contained.
+#
+#   --src         : the wiki directory produced by run_codewiki.
+#   --stack       : passed through verbatim from --render (already validated).
+#   --mkdocs-out  : <repo_dir>/mkdocs
+#   --vitepress-out: <repo_dir>/vitepress
+#   --serve [PORT]: forwarded only when --serve was supplied.
+#
+# Exits with code 5 if render_docs.sh is missing/non-executable or returns
+# non-zero. The --serve case blocks in the foreground until Ctrl-C; that
+# happens inside render_docs.sh, so we just propagate its exit status.
+# -----------------------------------------------------------------------------
+render_docs() {
+  local wiki_dir="$1"
+  local repo_dir="$2"
+  local stack="$3"
+  local serve="$4"
+  local serve_port="$5"
+
+  # Resolve the sibling render_docs.sh relative to this script so the wrapper
+  # works no matter where it's invoked from.
+  local script_path
+  script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/render_docs.sh"
+  if [[ ! -x "$script_path" ]]; then
+    die 5 "render_docs.sh not found or not executable at: $script_path"
+  fi
+
+  # Build argv as an array to preserve verbatim quoting of every value.
+  local args=(
+    "--src"      "$wiki_dir"
+    "--stack"    "$stack"
+    "--mkdocs-out"    "$repo_dir/mkdocs"
+    "--vitepress-out" "$repo_dir/vitepress"
+  )
+  if (( serve )); then
+    args+=( "--serve" )
+    # Optional port: only append when explicitly provided as a number.
+    if [[ -n "$serve_port" ]]; then
+      args+=( "$serve_port" )
+    fi
+  fi
+
+  log "Running: $script_path ${args[*]@Q}"
+  if ! "$script_path" "${args[@]}"; then
+    die 5 "render_docs.sh failed."
+  fi
+}
+
+# -----------------------------------------------------------------------------
 # parse_args "$@"
 # Consume CLI arguments into the global REPOSITORY / OUTPUT_DIR /
 # INSTRUCTIONS / HAVE_INSTRUCTIONS slots. Supports both short (-r) and long
@@ -287,6 +361,33 @@ parse_args() {
         HAVE_INSTRUCTIONS=1
         shift 2
         ;;
+      --render)
+        # --render takes a required value: mkdocs | vitepress | both.
+        if [[ -z "${2:-}" || "$2" == -* ]]; then
+          die 1 "Option '$1' requires a value (mkdocs, vitepress, or both)."
+        fi
+        case "$2" in
+          mkdocs|vitepress|both) ;;
+          *)
+            die 1 "Invalid --render value '$2'. Use mkdocs, vitepress, or both."
+            ;;
+        esac
+        RENDER_STACK="$2"
+        HAVE_RENDER=1
+        shift 2
+        ;;
+      --serve)
+        # --serve takes an optional port. Peek at the next token: if it is a
+        # positive integer we consume it as the port; otherwise we leave it
+        # for the next iteration. This mirrors render_docs.sh's own parser.
+        SERVE=1
+        if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+          SERVE_PORT="$2"
+          shift 2
+        else
+          shift
+        fi
+        ;;
       -h|--help)
         print_help
         exit 0
@@ -311,6 +412,11 @@ parse_args() {
     printf '\n' >&2
     print_help >&2
     die 1 "Missing required option: -r/--repository."
+  fi
+
+  # Cross-option validation: --serve only makes sense alongside --render.
+  if (( SERVE )) && (( ! HAVE_RENDER )); then
+    die 1 "--serve requires --render. Specify --render <mkdocs|vitepress|both> first."
   fi
 }
 
@@ -347,6 +453,12 @@ main() {
 
   # Step 6: generate the wiki.
   run_codewiki "$repo_dir" "$INSTRUCTIONS" "$HAVE_INSTRUCTIONS"
+
+  # Step 7 (optional): render the generated Markdown into static sites.
+  if (( HAVE_RENDER )); then
+    render_docs "$repo_dir/wiki" "$repo_dir" "$RENDER_STACK" \
+                "$SERVE" "$SERVE_PORT"
+  fi
 
   log "Done."
 }

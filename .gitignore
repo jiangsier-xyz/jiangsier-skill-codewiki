@@ -7,6 +7,10 @@ state/
 logs/
 backups/
 
+# End-to-end test output (cloned repos, generated wikis, rendered sites,
+# per-renderer sandboxes). Used by manual `codewiki.sh` smoke tests.
+test-output/
+
 # Editor cruft
 .DS_Store
 *.swp
