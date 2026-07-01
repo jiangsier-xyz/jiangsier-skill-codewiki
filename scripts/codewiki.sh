@@ -216,7 +216,7 @@ derive_repo_dirname() {
 # clone_or_pull <clone_url> <dest>
 # Ensure the repository is checked out at <dest>.
 #   - If <dest> is a git repo, run `git pull` to refresh it.
-#   - Otherwise, `git clone --depth 1` into <dest> (shallow, default branch).
+#   - Otherwise, `git clone --depth 1 --single-branch` into <dest> (shallow, default branch).
 # Exits with code 3 on any failure.
 # -----------------------------------------------------------------------------
 clone_or_pull() {
@@ -235,7 +235,7 @@ clone_or_pull() {
     # We do NOT pass --no-single-branch: codewiki needs the working tree,
     # not history, so the default branch tip is sufficient.
     log "Cloning (shallow) '$url' into '$dest'."
-    if ! git clone --depth 1 "$url" "$dest"; then
+    if ! git clone --depth 1 --single-branch "$url" "$dest"; then
       die 3 "git clone failed for '$url'."
     fi
   fi
